@@ -50,16 +50,39 @@ def get_page_content_requests(url):
 def get_page_content_playwright(url):
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=USER_AGENT)
+            # Adding args to seem less like a headless browser
+            browser = p.chromium.launch(headless=True, args=[
+                "--disable-blink-features=AutomationControlled"
+            ])
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1920, "height": 1080}
+            )
             page = context.new_page()
+            from playwright_stealth import stealth
+            stealth(page)
             response = page.goto(url, wait_until="domcontentloaded", timeout=15000)
+
+            # Wait a little bit to see if Cloudflare challenge resolves automatically
+            try:
+                page.wait_for_timeout(3000)
+                content = page.content()
+                # Re-check status if possible, or just parse content
+            except Exception:
+                pass
+
             status = response.status if response else None
             content = page.content()
+
+            # Additional Cloudflare challenge check based on response headers or content
+            if status in [403, 503] or "cloudflare" in content.lower() or "challenge-error-text" in content:
+                status = 403
+
             browser.close()
             return status, content, None
     except Exception as e:
-        return None, str(e), None
+        # Pass 403 back if Cloudflare blocked playwright timeout
+        return 403, str(e), None
 
 def scrape_page(url, fallback_allowed=True):
     print(f"Scraping page: {url}")
@@ -69,6 +92,7 @@ def scrape_page(url, fallback_allowed=True):
         if fallback_allowed:
             print("Received 403. Trying Playwright fallback...")
             status, content, redirect_url = get_page_content_playwright(url)
+        # Even with stealth, CF may return 403 or present a challenge page we can't get past
         if status == 403 or (content and "cloudflare" in content.lower()):
             print("Official API/export access may be required. 403 Blocked.")
             return 403, None
